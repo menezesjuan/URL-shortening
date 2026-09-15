@@ -9,8 +9,8 @@
   // --- Constants & Config ---
   const STORAGE_KEY = 'shortly_shortened_links';
   const MAX_STORED_LINKS = 15;
+  const PRIMARY_ENDPOINT = 'https://tinyurl.com/api-create.php?url=';
   const CLEANURI_ENDPOINT = 'https://cleanuri.com/api/v1/shorten';
-  const FALLBACK_ENDPOINT = 'https://tinyurl.com/api-create.php?url=';
 
   // --- DOM Elements ---
   const mobileNavToggle = document.getElementById('mobile-nav-toggle');
@@ -21,6 +21,7 @@
   const urlError = document.getElementById('url-error');
   const submitBtn = document.getElementById('submit-btn');
   const linksList = document.getElementById('links-list');
+  const copyStatus = document.getElementById('copy-status');
 
   // --- State ---
   let shortenedLinks = [];
@@ -107,12 +108,23 @@
   }
 
   // ==========================================================================
-  // 3. API Integration (Clean URI with Fallback)
+  // 3. API Integration (Direct Endpoint with Contingency)
   // ==========================================================================
   async function shortenUrl(targetUrl) {
-    // Strategy:
-    // 1. Attempt official Clean URI API (POST x-www-form-urlencoded).
-    // 2. If it fails due to CORS or network error, transparently use TinyURL fallback.
+    // Primary: Fast, direct client-side API without CORS rejections
+    try {
+      const response = await fetch(PRIMARY_ENDPOINT + encodeURIComponent(targetUrl));
+      if (response.ok) {
+        const shortUrl = await response.text();
+        if (shortUrl && shortUrl.startsWith('http')) {
+          return shortUrl.trim();
+        }
+      }
+    } catch (primaryErr) {
+      console.warn('Primary shortening service failed, attempting alternative:', primaryErr);
+    }
+
+    // Secondary: Clean URI endpoint (if deployed behind proxy or server environment)
     try {
       const cleanUriPromise = fetch(CLEANURI_ENDPOINT, {
         method: 'POST',
@@ -122,33 +134,22 @@
         body: new URLSearchParams({ url: targetUrl })
       });
 
-      // Give Clean URI 4.5 seconds timeout
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('CleanURI timeout')), 4500)
+        setTimeout(() => reject(new Error('CleanURI timeout')), 3000)
       );
 
-      const response = await Promise.race([cleanUriPromise, timeoutPromise]);
-
-      if (response.ok) {
-        const data = await response.json();
+      const cleanRes = await Promise.race([cleanUriPromise, timeoutPromise]);
+      if (cleanRes.ok) {
+        const data = await cleanRes.json();
         if (data && data.result_url) {
           return data.result_url;
         }
       }
-    } catch (cleanUriErr) {
-      console.warn('CleanURI request failed or was blocked by CORS, falling back to secondary shortener:', cleanUriErr);
+    } catch (cleanErr) {
+      console.warn('Alternative shortening service unreachable:', cleanErr);
     }
 
-    // Fallback: TinyURL API
-    const fallbackResponse = await fetch(FALLBACK_ENDPOINT + encodeURIComponent(targetUrl));
-    if (!fallbackResponse.ok) {
-      throw new Error('All shortening services failed');
-    }
-    const shortUrl = await fallbackResponse.text();
-    if (!shortUrl || !shortUrl.startsWith('http')) {
-      throw new Error('Invalid response from URL shortener');
-    }
-    return shortUrl.trim();
+    throw new Error('All shortening services failed');
   }
 
   // ==========================================================================
@@ -215,6 +216,7 @@
     copyBtn.type = 'button';
     copyBtn.className = 'btn btn-rounded link-copy-btn';
     copyBtn.dataset.url = item.shortUrl;
+    copyBtn.dataset.original = item.originalUrl;
     copyBtn.textContent = 'Copy';
     copyBtn.setAttribute('aria-label', 'Copy shortened link for ' + item.originalUrl);
 
@@ -281,13 +283,24 @@
         clearTimeout(copyTimeoutMap.get(buttonElement));
       }
 
+      const originalUrl = buttonElement.dataset.original || '';
+
       buttonElement.textContent = 'Copied!';
+      buttonElement.setAttribute('aria-label', 'Copied ' + text + ' to clipboard');
       buttonElement.classList.add('is-copied');
+
+      if (copyStatus) {
+        copyStatus.textContent = 'Copied ' + text;
+      }
 
       const timeoutId = setTimeout(() => {
         buttonElement.textContent = 'Copy';
+        buttonElement.setAttribute('aria-label', 'Copy shortened link for ' + originalUrl);
         buttonElement.classList.remove('is-copied');
         copyTimeoutMap.delete(buttonElement);
+        if (copyStatus) {
+          copyStatus.textContent = '';
+        }
       }, 2500);
 
       copyTimeoutMap.set(buttonElement, timeoutId);
@@ -326,6 +339,13 @@
     shortenForm.addEventListener('submit', async function (e) {
       e.preventDefault();
       clearError();
+
+      // Check offline connectivity
+      if (typeof navigator.onLine === 'boolean' && !navigator.onLine) {
+        showError('You appear to be offline. Please check your internet connection.');
+        urlInput.focus();
+        return;
+      }
 
       const rawValue = urlInput.value.trim();
 
